@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/docker/notary"
 	"github.com/docker/notary/client/changelist"
 	store "github.com/docker/notary/storage"
 	"github.com/docker/notary/tuf/data"
@@ -15,9 +14,9 @@ import (
 
 // AddDelegation creates changelist entries to add provided delegation public keys and paths.
 // This method composes AddDelegationRoleAndKeys and AddDelegationPaths (each creates one changelist if called).
-func (r *NotaryRepository) AddDelegation(name string, delegationKeys []data.PublicKey, paths []string) error {
+func (r *NotaryRepository) AddDelegation(name string, delegationKeys []data.PublicKey, paths []string, threshold int) error {
 	if len(delegationKeys) > 0 {
-		err := r.AddDelegationRoleAndKeys(name, delegationKeys)
+		err := r.AddDelegationRoleAndKeys(name, delegationKeys, threshold)
 		if err != nil {
 			return err
 		}
@@ -34,7 +33,7 @@ func (r *NotaryRepository) AddDelegation(name string, delegationKeys []data.Publ
 // AddDelegationRoleAndKeys creates a changelist entry to add provided delegation public keys.
 // This method is the simplest way to create a new delegation, because the delegation must have at least
 // one key upon creation to be valid since we will reject the changelist while validating the threshold.
-func (r *NotaryRepository) AddDelegationRoleAndKeys(name string, delegationKeys []data.PublicKey) error {
+func (r *NotaryRepository) AddDelegationRoleAndKeys(name string, delegationKeys []data.PublicKey, threshold int) error {
 
 	if !data.IsDelegation(name) {
 		return data.ErrInvalidRole{Role: name, Reason: "invalid delegation role name"}
@@ -47,11 +46,10 @@ func (r *NotaryRepository) AddDelegationRoleAndKeys(name string, delegationKeys 
 	defer cl.Close()
 
 	logrus.Debugf(`Adding delegation "%s" with threshold %d, and %d keys\n`,
-		name, notary.MinThreshold, len(delegationKeys))
+		name, threshold, len(delegationKeys))
 
-	// Defaulting to threshold of 1, since we don't allow for larger thresholds at the moment.
 	tdJSON, err := json.Marshal(&changelist.TUFDelegation{
-		NewThreshold: notary.MinThreshold,
+		NewThreshold: threshold,
 		AddKeys:      data.KeyList(delegationKeys),
 	})
 	if err != nil {

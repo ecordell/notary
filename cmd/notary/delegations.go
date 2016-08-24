@@ -40,8 +40,8 @@ var cmdDelegationPurgeKeysTemplate = usageTemplate{
 
 var cmdDelegationAddTemplate = usageTemplate{
 	Use:   "add [ GUN ] [ Role ] <X509 file path 1> ...",
-	Short: "Add a keys to delegation using the provided public key X509 certificates.",
-	Long:  "Add a keys to delegation using the provided public key PEM encoded X509 certificates in a specific Global Unique Name.",
+	Short: "Add keys to delegation using the provided public key X509 certificates.",
+	Long:  "Add keys to delegation using the provided public key PEM encoded X509 certificates in a specific Global Unique Name.",
 }
 
 type delegationCommander struct {
@@ -52,6 +52,7 @@ type delegationCommander struct {
 	paths                         []string
 	allPaths, removeAll, forceYes bool
 	keyIDs                        []string
+	threshold                     int
 
 	autoPublish bool
 }
@@ -72,6 +73,7 @@ func (d *delegationCommander) GetCommand() *cobra.Command {
 	cmd.AddCommand(cmdRemDelg)
 
 	cmdAddDelg := cmdDelegationAddTemplate.ToCommand(d.delegationAdd)
+	cmdAddDelg.Flags().IntVar(&d.threshold, "threshold", 1, "Threshold of keys required to sign")
 	cmdAddDelg.Flags().StringSliceVar(&d.paths, "paths", nil, "List of paths to add")
 	cmdAddDelg.Flags().BoolVar(&d.allPaths, "all-paths", false, "Add all paths to this delegation")
 	cmdAddDelg.Flags().BoolVarP(&d.autoPublish, "publish", "p", false, htAutoPublish)
@@ -333,7 +335,7 @@ func (d *delegationCommander) delegationAdd(cmd *cobra.Command, args []string) e
 	}
 
 	// Add the delegation to the repository
-	err = nRepo.AddDelegation(role, pubKeys, d.paths)
+	err = nRepo.AddDelegation(role, pubKeys, d.paths, d.threshold)
 	if err != nil {
 		return fmt.Errorf("failed to create delegation: %v", err)
 	}

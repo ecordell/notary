@@ -129,6 +129,34 @@ func (tr *Repo) ReplaceBaseKeys(role string, keys ...data.PublicKey) error {
 	return tr.AddBaseKeys(role, keys...)
 }
 
+func (tr *Repo) UpdateThreshold(role string, threshold int) error {
+	r, err := tr.GetBaseRole(role)
+	if err != nil {
+		return err
+	}
+	r.Threshold = threshold
+	switch role {
+	case data.CanonicalRootRole:
+		if tr.Root != nil {
+			tr.Root.Dirty = true
+		}
+	case data.CanonicalSnapshotRole:
+		if tr.Snapshot != nil {
+			tr.Snapshot.Dirty = true
+		}
+	case data.CanonicalTargetsRole:
+		if target, ok := tr.Targets[data.CanonicalTargetsRole]; ok {
+			target.Dirty = true
+		}
+	case data.CanonicalTimestampRole:
+		if tr.Timestamp != nil {
+			tr.Timestamp.Dirty = true
+		}
+	}
+	tr.Root.Signed.Roles[role].Threshold = threshold
+	return nil
+}
+
 // RemoveBaseKeys is used to remove keys from the roles in root.json
 func (tr *Repo) RemoveBaseKeys(role string, keyIDs ...string) error {
 	if tr.Root == nil {
@@ -283,22 +311,22 @@ func (tr *Repo) GetDelegationRole(name string) (data.DelegationRole, error) {
 }
 
 // GetAllLoadedRoles returns a list of all role entries loaded in this TUF repo, could be empty
-func (tr *Repo) GetAllLoadedRoles() []*data.Role {
-	var res []*data.Role
+func (tr *Repo) GetAllLoadedRoles() []data.Role {
+	var res []data.Role
 	if tr.Root == nil {
 		// if root isn't loaded, we should consider we have no loaded roles because we can't
 		// trust any other state that might be present
 		return res
 	}
 	for name, rr := range tr.Root.Signed.Roles {
-		res = append(res, &data.Role{
+		res = append(res, data.Role{
 			RootRole: *rr,
 			Name:     name,
 		})
 	}
 	for _, delegate := range tr.Targets {
 		for _, r := range delegate.Signed.Delegations.Roles {
-			res = append(res, r)
+			res = append(res, *r)
 		}
 	}
 	return res
@@ -355,6 +383,9 @@ func delegationUpdateVisitor(roleName string, addKeys data.KeyList, removeKeys, 
 			if !utils.StrSliceContains(delgRole.KeyIDs, k.ID()) {
 				delgRole.KeyIDs = append(delgRole.KeyIDs, k.ID())
 			}
+		}
+		if newThreshold > 0 {
+			delgRole.Threshold = newThreshold
 		}
 		// Make sure we have a valid role still
 		if len(delgRole.KeyIDs) < delgRole.Threshold {
@@ -500,6 +531,33 @@ func (tr *Repo) UpdateDelegationPaths(roleName string, addPaths, removePaths []s
 	// We do not have to verify that the walker reached its desired role in this scenario
 	// since we've already done another walk to the parent role in VerifyCanSign
 	err := tr.WalkTargets("", parent, delegationUpdateVisitor(roleName, data.KeyList{}, []string{}, addPaths, removePaths, clearPaths, notary.MinThreshold))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (tr *Repo) UpdateDelegationThreshold(roleName string, threshold int) error {
+	if !data.IsDelegation(roleName) {
+		return data.ErrInvalidRole{Role: roleName, Reason: "not a valid delegated role"}
+	}
+	parent := path.Dir(roleName)
+
+	if err := tr.VerifyCanSign(parent); err != nil {
+		return err
+	}
+
+	// check the parent role's metadata
+	_, ok := tr.Targets[parent]
+	if !ok { // the parent targetfile may not exist yet
+		// if not, this is an error because a delegation must exist to edit only paths
+		return data.ErrInvalidRole{Role: roleName, Reason: "no valid delegated role exists"}
+	}
+
+	// Walk to the parent of this delegation, since that is where its role metadata exists
+	// We do not have to verify that the walker reached its desired role in this scenario
+	// since we've already done another walk to the parent role in VerifyCanSign
+	err := tr.WalkTargets("", parent, delegationUpdateVisitor(roleName, data.KeyList{}, []string{}, nil, nil, false, threshold))
 	if err != nil {
 		return err
 	}
@@ -887,7 +945,7 @@ func (v versionedRootRoles) Less(i, j int) bool { return v[i].version < v[j].ver
 // carried in tr.Root.Keys and the private key is available (i.e. probably previously
 // trusted keys, to allow rollover).  If there are any errors, attempt to put root
 // back to the way it was (so version won't be incremented, for instance).
-func (tr *Repo) SignRoot(expires time.Time) (*data.Signed, error) {
+func (tr *Repo) SignRoot(expires time.Time, thresholdOverride int) (*data.Signed, error) {
 	logrus.Debug("signing root...")
 
 	// duplicate root and attempt to modify it rather than the existing root
@@ -949,7 +1007,7 @@ func (tr *Repo) SignRoot(expires time.Time) (*data.Signed, error) {
 	if err != nil {
 		return nil, err
 	}
-	signed, err = tr.sign(signed, rolesToSignWith, tr.getOptionalRootKeys(rolesToSignWith))
+	signed, err = tr.sign(signed, rolesToSignWith, tr.getOptionalRootKeys(rolesToSignWith), thresholdOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -1021,7 +1079,7 @@ func oldRootVersionName(version int) string {
 }
 
 // SignTargets signs the targets file for the given top level or delegated targets role
-func (tr *Repo) SignTargets(role string, expires time.Time) (*data.Signed, error) {
+func (tr *Repo) SignTargets(role string, expires time.Time, thresholdOverride int) (*data.Signed, error) {
 	logrus.Debugf("sign targets called for role %s", role)
 	if _, ok := tr.Targets[role]; !ok {
 		return nil, data.ErrInvalidRole{
@@ -1051,7 +1109,7 @@ func (tr *Repo) SignTargets(role string, expires time.Time) (*data.Signed, error
 		return nil, err
 	}
 
-	signed, err = tr.sign(signed, []data.BaseRole{targets}, nil)
+	signed, err = tr.sign(signed, []data.BaseRole{targets}, nil, thresholdOverride)
 	if err != nil {
 		logrus.Debug("errored signing ", role)
 		return nil, err
@@ -1061,7 +1119,7 @@ func (tr *Repo) SignTargets(role string, expires time.Time) (*data.Signed, error
 }
 
 // SignSnapshot updates the snapshot based on the current targets and root then signs it
-func (tr *Repo) SignSnapshot(expires time.Time) (*data.Signed, error) {
+func (tr *Repo) SignSnapshot(expires time.Time, thresholdOverride int) (*data.Signed, error) {
 	logrus.Debug("signing snapshot...")
 	signedRoot, err := tr.Root.ToSigned()
 	if err != nil {
@@ -1093,7 +1151,7 @@ func (tr *Repo) SignSnapshot(expires time.Time) (*data.Signed, error) {
 	if err != nil {
 		return nil, err
 	}
-	signed, err = tr.sign(signed, []data.BaseRole{snapshot}, nil)
+	signed, err = tr.sign(signed, []data.BaseRole{snapshot}, nil, thresholdOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -1122,7 +1180,7 @@ func (tr *Repo) SignTimestamp(expires time.Time) (*data.Signed, error) {
 	if err != nil {
 		return nil, err
 	}
-	signed, err = tr.sign(signed, []data.BaseRole{timestamp}, nil)
+	signed, err = tr.sign(signed, []data.BaseRole{timestamp}, nil, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -1131,12 +1189,19 @@ func (tr *Repo) SignTimestamp(expires time.Time) (*data.Signed, error) {
 	return signed, nil
 }
 
-func (tr Repo) sign(signedData *data.Signed, roles []data.BaseRole, optionalKeys []data.PublicKey) (*data.Signed, error) {
+func (tr Repo) sign(signedData *data.Signed, roles []data.BaseRole, optionalKeys []data.PublicKey, threshold int) (*data.Signed, error) {
 	validKeys := optionalKeys
 	for _, r := range roles {
 		roleKeys := r.ListKeys()
 		validKeys = append(roleKeys, validKeys...)
-		if err := signed.Sign(tr.cryptoService, signedData, roleKeys, r.Threshold, validKeys); err != nil {
+
+		// Use role threshold unless explicitly overridden for partial signing
+		calculatedThreshold := threshold
+		if calculatedThreshold == 0 {
+			calculatedThreshold = r.Threshold
+		}
+
+		if err := signed.Sign(tr.cryptoService, signedData, roleKeys, calculatedThreshold, validKeys); err != nil {
 			return nil, err
 		}
 	}

@@ -211,7 +211,7 @@ func generateTimestamp(gun string, builder tuf.RepoBuilder, store storage.MetaSt
 		// If we cannot sign the timestamp, then we don't have keys for the timestamp,
 		// and the client screwed up their root
 		return nil, validation.ErrBadRoot{
-			Msg: fmt.Sprintf("no  timestamp keys exist on the server"),
+			Msg: fmt.Sprintf("no timestamp keys exist on the server"),
 		}
 	default:
 		return nil, validation.ErrValidation{Msg: err.Error()}

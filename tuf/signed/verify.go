@@ -84,11 +84,6 @@ func VerifySignatures(s *data.Signed, roleData data.BaseRole) error {
 		}
 		valid[sig.KeyID] = struct{}{}
 	}
-	if len(valid) < roleData.Threshold {
-		return ErrRoleThreshold{
-			Msg: fmt.Sprintf("valid signatures did not meet threshold for %s", roleData.Name),
-		}
-	}
 
 	return nil
 }

@@ -1,9 +1,12 @@
 package client
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/Sirupsen/logrus"
@@ -11,6 +14,7 @@ import (
 	store "github.com/docker/notary/storage"
 	"github.com/docker/notary/tuf"
 	"github.com/docker/notary/tuf/data"
+	"github.com/docker/notary/tuf/signed"
 	"github.com/docker/notary/tuf/utils"
 )
 
@@ -46,6 +50,8 @@ func applyChangelist(repo *tuf.Repo, invalid *tuf.Repo, cl changelist.Changelist
 			err = applyTargetsChange(repo, invalid, c)
 		case c.Scope() == changelist.ScopeRoot:
 			err = applyRootChange(repo, c)
+		case c.Scope() == changelist.ScopeSnapshot:
+			err = applySnapshotChange(repo, c)
 		default:
 			return fmt.Errorf("scope not supported: %s", c.Scope())
 		}
@@ -61,7 +67,7 @@ func applyChangelist(repo *tuf.Repo, invalid *tuf.Repo, cl changelist.Changelist
 
 func applyTargetsChange(repo *tuf.Repo, invalid *tuf.Repo, c changelist.Change) error {
 	switch c.Type() {
-	case changelist.TypeTargetsTarget:
+	case changelist.TypeTargetsTarget, changelist.TypeRole:
 		return changeTargetMeta(repo, c)
 	case changelist.TypeTargetsDelegation:
 		return changeTargetsDelegation(repo, c)
@@ -118,10 +124,19 @@ func changeTargetsDelegation(repo *tuf.Repo, c changelist.Change) error {
 			removeTUFKeyIDs = append(removeTUFKeyIDs, canonicalToTUFID[canonID])
 		}
 
+		if td.NewThreshold > 0 {
+			return repo.UpdateDelegationThreshold(c.Scope(), td.NewThreshold)
+		}
+
+		// If we specify the only keys left delete the role, else just delete specified keys
+		if strings.Join(delgRole.ListKeyIDs(), ";") == strings.Join(removeTUFKeyIDs, ";") && len(td.AddKeys) == 0 {
+			return repo.DeleteDelegation(c.Scope())
+		}
 		err = repo.UpdateDelegationKeys(c.Scope(), td.AddKeys, removeTUFKeyIDs, td.NewThreshold)
 		if err != nil {
 			return err
 		}
+
 		return repo.UpdateDelegationPaths(c.Scope(), td.AddPaths, td.RemovePaths, td.ClearAllPaths)
 	case changelist.ActionDelete:
 		return repo.DeleteDelegation(c.Scope())
@@ -156,6 +171,24 @@ func changeTargetMeta(repo *tuf.Repo, c changelist.Change) error {
 			logrus.Errorf("couldn't remove target from %s: %s", c.Scope(), err.Error())
 		}
 
+	case changelist.ActionUpdate:
+		d := &changelist.TUFRootData{}
+		err := json.Unmarshal(c.Content(), d)
+		if err != nil {
+			return err
+		}
+		if len(d.Keys) > 0 {
+			for _, k := range d.Keys {
+				repo.AddBaseKeys(d.RoleName, k)
+			}
+		}
+		if d.Threshold != 0 {
+			logrus.Debugf("UPDATING THRESHOLD FOR %v to %v", d.RoleName, d.Threshold)
+			err = repo.UpdateThreshold(d.RoleName, d.Threshold)
+			if err != nil {
+				return err
+			}
+		}
 	default:
 		err = fmt.Errorf("action not yet supported: %s", c.Action())
 	}
@@ -165,7 +198,7 @@ func changeTargetMeta(repo *tuf.Repo, c changelist.Change) error {
 func applyRootChange(repo *tuf.Repo, c changelist.Change) error {
 	var err error
 	switch c.Type() {
-	case changelist.TypeRootRole:
+	case changelist.TypeRole:
 		err = applyRootRoleChange(repo, c)
 	default:
 		err = fmt.Errorf("type of root change not yet supported: %s", c.Type())
@@ -186,13 +219,68 @@ func applyRootRoleChange(repo *tuf.Repo, c changelist.Change) error {
 		if err != nil {
 			return err
 		}
+	case changelist.ActionUpdate:
+		d := &changelist.TUFRootData{}
+		err := json.Unmarshal(c.Content(), d)
+		if err != nil {
+			return err
+		}
+		if len(d.Keys) > 0 {
+			for _, k := range d.Keys {
+				repo.AddBaseKeys(d.RoleName, k)
+			}
+		}
+		if d.Threshold != 0 {
+			err = repo.UpdateThreshold(d.RoleName, d.Threshold)
+			if err != nil {
+				return err
+			}
+		}
 	default:
 		return fmt.Errorf("action not yet supported for root: %s", c.Action())
 	}
 	return nil
 }
 
-func nearExpiry(r data.SignedCommon) bool {
+func applySnapshotChange(repo *tuf.Repo, c changelist.Change) error {
+	var err error
+	switch c.Type() {
+	case changelist.TypeRole:
+		err = applySnapshotRoleChange(repo, c)
+	default:
+		logrus.Debug("type of snapshot change not yet supported: ", c.Type())
+	}
+	return err // might be nil
+}
+
+func applySnapshotRoleChange(repo *tuf.Repo, c changelist.Change) error {
+	switch c.Action() {
+	case changelist.ActionUpdate:
+		d := &changelist.TUFRootData{}
+		err := json.Unmarshal(c.Content(), d)
+		logrus.Debug(d)
+		if err != nil {
+			return err
+		}
+		if len(d.Keys) > 0 {
+			for _, k := range d.Keys {
+				repo.AddBaseKeys(d.RoleName, k)
+			}
+		}
+		if d.Threshold != 0 {
+			logrus.Debugf("UPDATING THRESHOLD FOR %v to %v", d.RoleName, d.Threshold)
+			err = repo.UpdateThreshold(d.RoleName, d.Threshold)
+			if err != nil {
+				return err
+			}
+		}
+	default:
+		logrus.Debug("action not yet supported for snapshot: ", c.Action())
+	}
+	return nil
+}
+
+func nearExpiry(r *data.SignedCommon) bool {
 	plus6mo := time.Now().AddDate(0, 6, 0)
 	return r.Expires.Before(plus6mo)
 }
@@ -200,18 +288,18 @@ func nearExpiry(r data.SignedCommon) bool {
 func warnRolesNearExpiry(r *tuf.Repo) {
 	//get every role and its respective signed common and call nearExpiry on it
 	//Root check
-	if nearExpiry(r.Root.Signed.SignedCommon) {
+	if nearExpiry(&r.Root.Signed.SignedCommon) {
 		logrus.Warn("root is nearing expiry, you should re-sign the role metadata")
 	}
 	//Targets and delegations check
 	for role, signedTOrD := range r.Targets {
 		//signedTOrD is of type *data.SignedTargets
-		if nearExpiry(signedTOrD.Signed.SignedCommon) {
+		if nearExpiry(&signedTOrD.Signed.SignedCommon) {
 			logrus.Warn(role, " metadata is nearing expiry, you should re-sign the role metadata")
 		}
 	}
 	//Snapshot check
-	if nearExpiry(r.Snapshot.Signed.SignedCommon) {
+	if nearExpiry(&r.Snapshot.Signed.SignedCommon) {
 		logrus.Warn("snapshot is nearing expiry, you should re-sign the role metadata")
 	}
 	//do not need to worry about Timestamp, notary signer will re-sign with the timestamp key
@@ -256,23 +344,44 @@ func rotateRemoteKey(url, gun, role string, rt http.RoundTripper) (data.PublicKe
 }
 
 // signs and serializes the metadata for a canonical role in a TUF repo to JSON
-func serializeCanonicalRole(tufRepo *tuf.Repo, role string) (out []byte, err error) {
+func serializeCanonicalRole(tufRepo *tuf.Repo, role string, threshold int, partial bool) (out []byte, err error) {
 	var s *data.Signed
 	switch {
 	case role == data.CanonicalRootRole:
-		s, err = tufRepo.SignRoot(data.DefaultExpires(role))
+		s, err = tufRepo.SignRoot(data.DefaultExpires(role), threshold)
 	case role == data.CanonicalSnapshotRole:
-		s, err = tufRepo.SignSnapshot(data.DefaultExpires(role))
+		s, err = tufRepo.SignSnapshot(data.DefaultExpires(role), threshold)
 	case tufRepo.Targets[role] != nil:
 		s, err = tufRepo.SignTargets(
-			role, data.DefaultExpires(data.CanonicalTargetsRole))
+			role, data.DefaultExpires(data.CanonicalTargetsRole), threshold)
 	default:
 		err = fmt.Errorf("%s not supported role to sign on the client", role)
 	}
-
+	if sigErr, ok := err.(signed.ErrInsufficientSignatures); ok {
+		return stagePartial(tufRepo, sigErr, role, partial)
+	}
 	if err != nil {
 		return
 	}
-
 	return json.Marshal(s)
+}
+
+// TODO: wrap in a "shouldStagePartial" which will either ask the user for permission
+// or act automatically based on a flag
+func stagePartial(tufRepo *tuf.Repo, sigErr signed.ErrInsufficientSignatures, role string, partial bool) (out []byte, err error) {
+	if partial {
+		return serializeCanonicalRole(tufRepo, role, sigErr.FoundKeys, partial)
+	}
+	stdin := bufio.NewReader(os.Stdin)
+	fmt.Fprintf(os.Stdout, "Signing metadata failed: %v.\n", sigErr)
+	fmt.Fprintf(os.Stdout, "There were not enough signatures provided for the %v role. Do you want to publish partially signed metadata? (y/n) ", role)
+	signPartialIn, inErr := stdin.ReadByte()
+	if inErr != nil {
+		logrus.Errorf("error processing input: %s", inErr)
+		return
+	}
+	if strings.EqualFold(string(signPartialIn), "y") && sigErr.FoundKeys > 0 {
+		return serializeCanonicalRole(tufRepo, role, sigErr.FoundKeys, partial)
+	}
+	return
 }

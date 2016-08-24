@@ -106,9 +106,10 @@ type tufCommander struct {
 	sha512  string
 	rootKey string
 
-	input  string
-	output string
-	quiet  bool
+	input   string
+	output  string
+	quiet   bool
+	partial bool
 
 	deleteIdx         []int
 	reset             bool
@@ -130,7 +131,10 @@ func (t *tufCommander) AddToCommand(cmd *cobra.Command) {
 	cmdStatus.Flags().BoolVar(&t.reset, "reset", false, "Reset the changelist for the GUN by deleting all pending changes")
 	cmd.AddCommand(cmdStatus)
 
-	cmd.AddCommand(cmdTUFPublishTemplate.ToCommand(t.tufPublish))
+	cmdTUFPublish := cmdTUFPublishTemplate.ToCommand(t.tufPublish)
+	cmdTUFPublish.Flags().BoolVarP(&t.partial, "partial", "p", false, "If true, will not prompt before publishing partially signed metadata.")
+	cmd.AddCommand(cmdTUFPublish)
+
 	cmd.AddCommand(cmdTUFLookupTemplate.ToCommand(t.tufLookup))
 
 	cmdTUFList := cmdTUFListTemplate.ToCommand(t.tufList)
@@ -623,7 +627,7 @@ func (t *tufCommander) tufPublish(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err = nRepo.Publish(); err != nil {
+	if err = nRepo.Publish(t.partial); err != nil {
 		return err
 	}
 	return nil
@@ -961,5 +965,5 @@ func maybeAutoPublish(cmd *cobra.Command, doPublish bool, gun string, config *vi
 	}
 
 	cmd.Println("Auto-publishing changes to", gun)
-	return nRepo.Publish()
+	return nRepo.Publish(false)
 }

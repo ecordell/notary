@@ -20,7 +20,7 @@ const (
 // all changes in Snapshot and Timestamp are programmatically
 // generated base on Root and Targets changes.
 const (
-	TypeRootRole          = "role"
+	TypeRole              = "role"
 	TypeTargetsTarget     = "target"
 	TypeTargetsDelegation = "delegation"
 	TypeWitness           = "witness"
@@ -39,8 +39,9 @@ type TUFChange struct {
 // TUFRootData represents a modification of the keys associated
 // with a role that appears in the root.json
 type TUFRootData struct {
-	Keys     data.KeyList `json:"keys"`
-	RoleName string       `json:"role"`
+	Keys      data.KeyList `json:"keys"`
+	RoleName  string       `json:"role"`
+	Threshold int          `json:"threshold, omitempty"`
 }
 
 // NewTUFChange initializes a TUFChange object
@@ -80,7 +81,7 @@ func (c TUFChange) Content() []byte {
 }
 
 // TUFDelegation represents a modification to a target delegation
-// this includes creating a delegations. This format is used to avoid
+// this includes creating a delegation. This format is used to avoid
 // unexpected race conditions between humans modifying the same delegation
 type TUFDelegation struct {
 	NewName       string       `json:"new_name,omitempty"`

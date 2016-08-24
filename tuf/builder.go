@@ -309,7 +309,7 @@ func (rb *repoBuilder) GenerateSnapshot(prev *data.SignedSnapshot) ([]byte, int,
 		rb.repo.Snapshot = prev
 	}
 
-	sgnd, err := rb.repo.SignSnapshot(data.DefaultExpires(data.CanonicalSnapshotRole))
+	sgnd, err := rb.repo.SignSnapshot(data.DefaultExpires(data.CanonicalSnapshotRole), 0)
 	if err != nil {
 		rb.repo.Snapshot = nil
 		return nil, 0, err

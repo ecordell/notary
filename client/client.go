@@ -162,7 +162,7 @@ func rootCertKey(gun string, privKey data.PrivateKey) (data.PublicKey, error) {
 	x509PublicKey := utils.CertToKey(cert)
 	if x509PublicKey == nil {
 		return nil, fmt.Errorf(
-			"cannot use regenerated certificate: format %s", cert.PublicKeyAlgorithm)
+			"cannot use regenerated certificate: format %v", cert.PublicKeyAlgorithm)
 	}
 
 	return x509PublicKey, nil
@@ -306,22 +306,12 @@ func (r *NotaryRepository) Initialize(rootKeyIDs []string, serverManagedRoles ..
 
 // adds a TUF Change template to the given roles
 func addChange(cl *changelist.FileChangelist, c changelist.Change, roles ...string) error {
-
 	if len(roles) == 0 {
 		roles = []string{data.CanonicalTargetsRole}
 	}
 
 	var changes []changelist.Change
 	for _, role := range roles {
-		// Ensure we can only add targets to the CanonicalTargetsRole,
-		// or a Delegation role (which is <CanonicalTargetsRole>/something else)
-		if role != data.CanonicalTargetsRole && !data.IsDelegation(role) && !data.IsWildDelegation(role) {
-			return data.ErrInvalidRole{
-				Role:   role,
-				Reason: "cannot add targets to this role",
-			}
-		}
-
 		changes = append(changes, changelist.NewTUFChange(
 			c.Action(),
 			role,
@@ -339,11 +329,121 @@ func addChange(cl *changelist.FileChangelist, c changelist.Change, roles ...stri
 	return nil
 }
 
+func (r *NotaryRepository) AddKey(name string, keys data.KeyList) error {
+	cl, err := changelist.NewFileChangelist(filepath.Join(r.tufRepoPath, "changelist"))
+	if err != nil {
+		return err
+	}
+	defer cl.Close()
+
+	logrus.Debugf(`Adding keys to %s role\n`, name)
+
+	rootJSON, err := json.Marshal(&changelist.TUFRootData{
+		Keys:     keys,
+		RoleName: name,
+	})
+	if err != nil {
+		return err
+	}
+	template := changelist.NewTUFChange(
+		changelist.ActionUpdate, "", changelist.TypeRole, "", rootJSON)
+	return addChange(cl, template, name)
+}
+
+func (r *NotaryRepository) RemoveKey(name string, keys []string) error {
+	cl, err := changelist.NewFileChangelist(filepath.Join(r.tufRepoPath, "changelist"))
+	if err != nil {
+		return err
+	}
+	defer cl.Close()
+
+	r.bootstrapRepo()
+	if err != nil {
+		return err
+	}
+
+	logrus.Debugf("Removing keys from %s role", name)
+	logrus.Debugf("tufRepo: %v", r.tufRepo)
+	role, err := r.tufRepo.GetBaseRole(name)
+	if err != nil {
+		return err
+	}
+
+	logrus.Debugf("Existing keys: %v", role.Keys)
+
+	var keepKeyList data.KeyList
+	for _, existingKey := range role.Keys {
+		remove := false
+		for _, key := range keys {
+			if key == existingKey.ID() {
+				remove = true
+				break
+			}
+		}
+		if !remove {
+			pubKey := existingKey
+			keepKeyList = append(keepKeyList, pubKey)
+		}
+	}
+
+	logrus.Debugf("Keys after removing: %v", keepKeyList)
+
+	rootJSON, err := json.Marshal(&changelist.TUFRootData{
+		Keys:     keepKeyList,
+		RoleName: name,
+	})
+	if err != nil {
+		return err
+	}
+	template := changelist.NewTUFChange(
+		changelist.ActionUpdate, "", changelist.TypeRole, "", rootJSON)
+	return addChange(cl, template, name)
+}
+
+func (r *NotaryRepository) UpdateThreshold(role string, threshold int) error {
+	cl, err := changelist.NewFileChangelist(filepath.Join(r.tufRepoPath, "changelist"))
+	if err != nil {
+		return err
+	}
+	defer cl.Close()
+
+	var template *changelist.TUFChange
+	if data.IsDelegation(role) {
+		thresholdJSON, err := json.Marshal(&changelist.TUFDelegation{
+			NewThreshold: threshold,
+		})
+		if err != nil {
+			return err
+		}
+		template = newUpdateDelegationChange(role, thresholdJSON)
+	} else {
+		thresholdJSON, err := json.Marshal(&changelist.TUFRootData{
+			RoleName:  role,
+			Threshold: threshold,
+		})
+		if err != nil {
+			return err
+		}
+		template = changelist.NewTUFChange(
+			changelist.ActionUpdate, "", changelist.TypeRole, "", thresholdJSON)
+	}
+	return addChange(cl, template, role)
+}
+
 // AddTarget creates new changelist entries to add a target to the given roles
 // in the repository when the changelist gets applied at publish time.
 // If roles are unspecified, the default role is "targets"
 func (r *NotaryRepository) AddTarget(target *Target, roles ...string) error {
-
+	// Ensure we can only add targets to the CanonicalTargetsRole,
+	// or a Delegation role (which is <CanonicalTargetsRole>/something else)
+	for _, role := range roles {
+		if role != data.CanonicalTargetsRole && !data.IsDelegation(role) {
+			return data.ErrInvalidRole{
+				Role:   role,
+				Reason: "cannot add targets to this role",
+			}
+		}
+	}
 	if len(target.Hashes) == 0 {
 		return fmt.Errorf("no hashes specified for target \"%s\"", target.Name)
 	}
@@ -555,7 +655,7 @@ func (r *NotaryRepository) ListRoles() ([]RoleWithSignatures, error) {
 
 	// Populate RoleWithSignatures with Role from keysDB and signatures from TUF metadata
 	for _, role := range roles {
-		roleWithSig := RoleWithSignatures{Role: *role, Signatures: nil}
+		roleWithSig := RoleWithSignatures{Role: role, Signatures: nil}
 		switch role.Name {
 		case data.CanonicalRootRole:
 			roleWithSig.Signatures = r.tufRepo.Root.Signatures
@@ -579,14 +679,23 @@ func (r *NotaryRepository) ListRoles() ([]RoleWithSignatures, error) {
 	return roleWithSigs, nil
 }
 
+// GetAllRoles returns all roles currently stored in the repository
+func (r *NotaryRepository) GetAllRoles() ([]data.Role, error) {
+	// Update to latest repo state
+	if err := r.Update(false); err != nil {
+		return nil, err
+	}
+	return r.tufRepo.GetAllLoadedRoles(), nil
+}
+
 // Publish pushes the local changes in signed material to the remote notary-server
 // Conceptually it performs an operation similar to a `git rebase`
-func (r *NotaryRepository) Publish() error {
+func (r *NotaryRepository) Publish(partial bool) error {
 	cl, err := r.GetChangelist()
 	if err != nil {
 		return err
 	}
-	if err = r.publish(cl); err != nil {
+	if err = r.publish(cl, partial); err != nil {
 		return err
 	}
 	if err = cl.Clear(""); err != nil {
@@ -600,7 +709,7 @@ func (r *NotaryRepository) Publish() error {
 
 // publish pushes the changes in the given changelist to the remote notary-server
 // Conceptually it performs an operation similar to a `git rebase`
-func (r *NotaryRepository) publish(cl changelist.Changelist) error {
+func (r *NotaryRepository) publish(cl changelist.Changelist, partial bool) error {
 	var initialPublish bool
 	// update first before publishing
 	if err := r.Update(true); err != nil {
@@ -640,8 +749,8 @@ func (r *NotaryRepository) publish(cl changelist.Changelist) error {
 	// check if our root file is nearing expiry or dirty. Resign if it is.  If
 	// root is not dirty but we are publishing for the first time, then just
 	// publish the existing root we have.
-	if nearExpiry(r.tufRepo.Root.Signed.SignedCommon) || r.tufRepo.Root.Dirty {
-		rootJSON, err := serializeCanonicalRole(r.tufRepo, data.CanonicalRootRole)
+	if nearExpiry(&r.tufRepo.Root.Signed.SignedCommon) || r.tufRepo.Root.Dirty {
+		rootJSON, err := serializeCanonicalRole(r.tufRepo, data.CanonicalRootRole, 0, partial)
 		if err != nil {
 			return err
 		}
@@ -657,7 +766,7 @@ func (r *NotaryRepository) publish(cl changelist.Changelist) error {
 	// iterate through all the targets files - if they are dirty, sign and update
 	for roleName, roleObj := range r.tufRepo.Targets {
 		if roleObj.Dirty || (roleName == data.CanonicalTargetsRole && initialPublish) {
-			targetsJSON, err := serializeCanonicalRole(r.tufRepo, roleName)
+			targetsJSON, err := serializeCanonicalRole(r.tufRepo, roleName, 0, partial)
 			if err != nil {
 				return err
 			}
@@ -675,7 +784,7 @@ func (r *NotaryRepository) publish(cl changelist.Changelist) error {
 	}
 
 	snapshotJSON, err := serializeCanonicalRole(
-		r.tufRepo, data.CanonicalSnapshotRole)
+		r.tufRepo, data.CanonicalSnapshotRole, 0, partial)
 
 	if err == nil {
 		// Only update the snapshot if we've successfully signed it.
@@ -695,7 +804,6 @@ func (r *NotaryRepository) publish(cl changelist.Changelist) error {
 	if err != nil {
 		return err
 	}
-
 	return remote.SetMulti(updatedFiles)
 }
 
@@ -738,7 +846,7 @@ func (r *NotaryRepository) bootstrapRepo() error {
 func (r *NotaryRepository) saveMetadata(ignoreSnapshot bool) error {
 	logrus.Debugf("Saving changes to Trusted Collection.")
 
-	rootJSON, err := serializeCanonicalRole(r.tufRepo, data.CanonicalRootRole)
+	rootJSON, err := serializeCanonicalRole(r.tufRepo, data.CanonicalRootRole, 0, false)
 	if err != nil {
 		return err
 	}
@@ -749,7 +857,7 @@ func (r *NotaryRepository) saveMetadata(ignoreSnapshot bool) error {
 
 	targetsToSave := make(map[string][]byte)
 	for t := range r.tufRepo.Targets {
-		signedTargets, err := r.tufRepo.SignTargets(t, data.DefaultExpires(data.CanonicalTargetsRole))
+		signedTargets, err := r.tufRepo.SignTargets(t, data.DefaultExpires(data.CanonicalTargetsRole), 0)
 		if err != nil {
 			return err
 		}
@@ -770,7 +878,7 @@ func (r *NotaryRepository) saveMetadata(ignoreSnapshot bool) error {
 		return nil
 	}
 
-	snapshotJSON, err := serializeCanonicalRole(r.tufRepo, data.CanonicalSnapshotRole)
+	snapshotJSON, err := serializeCanonicalRole(r.tufRepo, data.CanonicalSnapshotRole, 0, false)
 	if err != nil {
 		return err
 	}
@@ -956,7 +1064,7 @@ func (r *NotaryRepository) RotateKey(role string, serverManagesKey bool) error {
 	if err := r.rootFileKeyChange(cl, role, changelist.ActionCreate, pubKey); err != nil {
 		return err
 	}
-	return r.publish(cl)
+	return r.publish(cl, false)
 }
 
 func (r *NotaryRepository) rootFileKeyChange(cl changelist.Changelist, role, action string, key data.PublicKey) error {
@@ -974,7 +1082,7 @@ func (r *NotaryRepository) rootFileKeyChange(cl changelist.Changelist, role, act
 	c := changelist.NewTUFChange(
 		action,
 		changelist.ScopeRoot,
-		changelist.TypeRootRole,
+		changelist.TypeRole,
 		role,
 		metaJSON,
 	)

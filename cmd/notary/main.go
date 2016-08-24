@@ -181,6 +181,11 @@ func (n *notaryCommander) GetCommand() *cobra.Command {
 		retriever:    n.getRetriever(),
 	}
 
+	cmdRoleGenerator := &roleCommander{
+		configGetter: n.parseConfig,
+		retriever:    n.getRetriever(),
+	}
+
 	cmdTUFGenerator := &tufCommander{
 		configGetter: n.parseConfig,
 		retriever:    n.getRetriever(),
@@ -188,6 +193,7 @@ func (n *notaryCommander) GetCommand() *cobra.Command {
 
 	notaryCmd.AddCommand(cmdKeyGenerator.GetCommand())
 	notaryCmd.AddCommand(cmdDelegationGenerator.GetCommand())
+	notaryCmd.AddCommand(cmdRoleGenerator.GetCommand())
 
 	cmdTUFGenerator.AddToCommand(&notaryCmd)
 
