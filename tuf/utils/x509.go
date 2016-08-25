@@ -252,9 +252,31 @@ func ParsePEMPublicKey(pubKeyBytes []byte) (data.PublicKey, error) {
 			return nil, fmt.Errorf("invalid certificate: %v", err)
 		}
 		return CertToKey(cert), nil
+	case "PUBLIC KEY":
+		keyType, err := keyTypeForPublicKey(pemBlock.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		return data.NewPublicKey(keyType, pemBlock.Bytes), nil
 	default:
-		return nil, fmt.Errorf("unsupported PEM block type %q, expected certificate", pemBlock.Type)
+		return nil, fmt.Errorf("unsupported PEM block type %q, expected CERTIFICATE or PUBLIC KEY", pemBlock.Type)
 	}
+}
+
+func keyTypeForPublicKey(pubKeyBytes []byte) (string, error) {
+	pub, err := x509.ParsePKIXPublicKey(pubKeyBytes)
+	if err != nil {
+		return "", fmt.Errorf("unable to parse pem encoded public key: %v", err)
+	}
+	_, ok := pub.(*ecdsa.PublicKey)
+	if ok {
+		return data.ECDSAKey, nil
+	}
+	_, ok = pub.(*rsa.PublicKey)
+	if ok {
+		return data.RSAKey, nil
+	}
+	return "", fmt.Errorf("unkown public key format")
 }
 
 // ValidateCertificate returns an error if the certificate is not valid for notary
